@@ -390,6 +390,111 @@ def create_per_head_varying_kv(
     return tensor * scale
 
 
+@pytest.mark.parametrize("num_tokens", [256, 257, 897])
+def test_batch_prefill_paged_sliding_window_fp8_q_boundary(num_tokens):
+    if not is_sm90a_supported(torch.device("cuda")):
+        pytest.skip("SM90A is not supported")
+
+    torch.manual_seed(1000 + num_tokens)
+    page_size = 32
+    window_left = 511
+    num_qo_heads = 64
+    num_kv_heads = 8
+    head_dim = 128
+    q_dtype = torch.float8_e4m3fn
+    kv_dtype = torch.float8_e4m3fn
+    o_dtype = torch.bfloat16
+    input_scale = 0.05
+
+    num_pages = (num_tokens + page_size - 1) // page_size
+    last_page_len = num_tokens % page_size or page_size
+
+    q_bf16 = (
+        torch.randn(
+            num_tokens,
+            num_qo_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * input_scale
+    )
+    q_fp8 = q_bf16.to(q_dtype)
+
+    kv_bf16 = (
+        torch.randn(
+            num_pages,
+            2,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * input_scale
+    )
+    k_bf16, v_bf16 = torch.chunk(kv_bf16, 2, dim=1)
+    k_scale = (k_bf16.abs().amax().clamp(min=1e-12) / 256).item()
+    v_scale = (v_bf16.abs().amax().clamp(min=1e-12) / 256).item()
+    k_fp8 = (k_bf16 / k_scale).to(kv_dtype)
+    v_fp8 = (v_bf16 / v_scale).to(kv_dtype)
+    kv_cache = torch.cat([k_fp8, v_fp8], dim=1)
+
+    qo_indptr = torch.tensor([0, num_tokens], dtype=torch.int32, device="cuda")
+    paged_kv_indptr = torch.tensor([0, num_pages], dtype=torch.int32, device="cuda")
+    paged_kv_indices = torch.arange(num_pages, dtype=torch.int32, device="cuda")
+    paged_kv_last_page_len = torch.tensor(
+        [last_page_len], dtype=torch.int32, device="cuda"
+    )
+
+    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        workspace, kv_layout="NHD", backend="fa3"
+    )
+    wrapper.plan(
+        qo_indptr,
+        paged_kv_indptr,
+        paged_kv_indices,
+        paged_kv_last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        causal=True,
+        window_left=window_left,
+        q_data_type=q_dtype,
+        kv_data_type=kv_dtype,
+        o_data_type=o_dtype,
+    )
+    out = wrapper.run(q_fp8, kv_cache, q_scale=1.0, k_scale=k_scale, v_scale=v_scale)
+    torch.cuda.synchronize()
+
+    k_ref = (
+        k_fp8.squeeze(1)
+        .reshape(num_pages * page_size, num_kv_heads, head_dim)[:num_tokens]
+        .float()
+        .mul(k_scale)
+        .to(torch.bfloat16)
+    )
+    v_ref = (
+        v_fp8.squeeze(1)
+        .reshape(num_pages * page_size, num_kv_heads, head_dim)[:num_tokens]
+        .float()
+        .mul(v_scale)
+        .to(torch.bfloat16)
+    )
+    q_ref = q_fp8.float().to(torch.bfloat16)
+    ref = flashinfer.single_prefill_with_kv_cache(
+        q_ref,
+        k_ref,
+        v_ref,
+        causal=True,
+        window_left=window_left,
+        backend="fa2",
+    )
+    torch.testing.assert_close(out.float(), ref.float(), rtol=2e-1, atol=2e-1)
+
+
 # Test batch prefill with paged KV cache: MSE should be below threshold
 @pytest.mark.parametrize("batch_size", [2, 4])
 @pytest.mark.parametrize("num_heads", [8, 32])
