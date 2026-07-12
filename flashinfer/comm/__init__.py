@@ -80,5 +80,18 @@ def __getattr__(name: str):
     if name == "all_gather_matmul":
         from .all_gather_matmul import all_gather_matmul
 
+        globals()[name] = all_gather_matmul
         return all_gather_matmul
+    if name in ("matmul_reduce_scatter", "MatmulReduceScatterWorkspace"):
+        from .matmul_reduce_scatter import (
+            MatmulReduceScatterWorkspace,
+            matmul_reduce_scatter,
+        )
+
+        # The subpackage import binds the *module* object over the function's
+        # name in this namespace; rebind both names so later lookups resolve
+        # to the callables regardless of which name was imported first.
+        globals()["matmul_reduce_scatter"] = matmul_reduce_scatter
+        globals()["MatmulReduceScatterWorkspace"] = MatmulReduceScatterWorkspace
+        return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
