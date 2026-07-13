@@ -148,9 +148,9 @@ class MatmulReduceScatterWorkspace:
             views = []
             for slot in self.slots:
                 y_own = slot["y"][row0 : row0 + chunk]
-                pull_srcs = tuple(
-                    t[row0 : row0 + chunk] for t in slot["y_remote"]
-                ) + (y_own,)
+                pull_srcs = tuple(t[row0 : row0 + chunk] for t in slot["y_remote"]) + (
+                    y_own,
+                )
                 push_srcs = tuple(
                     slot["recv"][i][:chunk] for i in range(self.world_size - 1)
                 ) + (y_own,)
@@ -206,7 +206,7 @@ def matmul_reduce_scatter_triton(
         raise RuntimeError("workspace has been destroyed")
     if workspace.group.group_name != group.group_name:
         raise ValueError("workspace was created for a different process group")
-    if M > workspace.max_M or N != workspace.N or inp.dtype != workspace.dtype:
+    if workspace.max_M < M or N != workspace.N or inp.dtype != workspace.dtype:
         raise ValueError(
             f"workspace (max_M={workspace.max_M}, N={workspace.N}, "
             f"dtype={workspace.dtype}) cannot serve inp {tuple(inp.shape)} "
@@ -216,9 +216,7 @@ def matmul_reduce_scatter_triton(
     if strategy == "auto":
         strategy = "push" if M >= _PUSH_MIN_TOKENS else "tail"
     elif strategy not in ("tail", "push"):
-        raise ValueError(
-            f"strategy must be 'auto', 'tail' or 'push', got {strategy}"
-        )
+        raise ValueError(f"strategy must be 'auto', 'tail' or 'push', got {strategy}")
 
     workspace.seq += 1
     seq = workspace.seq

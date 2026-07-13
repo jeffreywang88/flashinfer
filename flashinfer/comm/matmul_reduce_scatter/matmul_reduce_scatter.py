@@ -30,8 +30,8 @@ Workspace:
     destroy() when done.
 
 Routing:
-    - Triton implementation (matmul_reduce_scatter_triton) on all architectures;
-      a cuTile fast path for SM >= 100 may be added later.
+    - SM >= 100 (Blackwell+): cuTile implementation (matmul_reduce_scatter_cutile)
+    - SM <  100             : Triton implementation  (matmul_reduce_scatter_triton)
 
 Example (run with torchrun or mp.spawn across all GPU ranks)::
 
@@ -67,6 +67,7 @@ import torch
 import torch.distributed as dist
 
 from flashinfer.utils import register_custom_op
+from .matmul_reduce_scatter_cutile import matmul_reduce_scatter_cutile
 from .matmul_reduce_scatter_triton import (
     MatmulReduceScatterWorkspace as MatmulReduceScatterWorkspace,
 )
@@ -86,8 +87,14 @@ def matmul_reduce_scatter(
     verbose: bool = False,
     strategy: Literal["auto", "tail", "push"] = "auto",
 ):
-    """Compute-signal/pull-reduce matmul + reduce-scatter; dispatches to Triton.
-    ``strategy="auto"`` picks tail/push by token count (crossover 8192)."""
+    """Compute-signal/pull-reduce matmul + reduce-scatter; dispatches to cuTile
+    (SM>=100) or Triton. ``strategy="auto"`` picks tail/push by token count
+    (crossover 8192)."""
+    major, _ = torch.cuda.get_device_capability(inp.device)
+    if major >= 10:
+        return matmul_reduce_scatter_cutile(
+            inp, w, group, workspace, verbose=verbose, strategy=strategy
+        )
     return matmul_reduce_scatter_triton(
         inp, w, group, workspace, verbose=verbose, strategy=strategy
     )

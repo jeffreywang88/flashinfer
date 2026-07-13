@@ -172,6 +172,9 @@ def run_correctness(rank: int, world_size: int, port: int, dtype: torch.dtype):
     device, group = setup(rank, world_size, port)
     w = torch.randn((HID, OUT_HID), device=device, dtype=dtype)
     bs_list = [2**15, 2**14, 2**13, 2**12]
+    # Non-power-of-two sizes (kept divisible by world_size, which reduce-scatter
+    # requires; the odd per-rank chunk also exercises partial reduce tiles).
+    bs_list += [world_size * 520]
     # One workspace sized for the largest bs, reused for every smaller one.
     workspace = MatmulReduceScatterWorkspace(group, max(bs_list), OUT_HID, dtype=dtype)
     for bs in bs_list:
