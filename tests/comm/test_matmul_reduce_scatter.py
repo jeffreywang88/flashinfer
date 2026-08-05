@@ -110,6 +110,18 @@ def unit_test(rank: int, world_size: int, port: int, dtype: torch.dtype):
                 f"unit_test passed ({strategy}): relative-norm error = {rel.item():.5f}"
             )
     workspace.destroy()
+
+    # Context-manager cleanup path (workspace creation is collective, so all
+    # ranks enter/exit together).
+    small = inp[: world_size * 64]
+    with MatmulReduceScatterWorkspace(
+        group, small.shape[0], OUT_HID, dtype=dtype
+    ) as ctx_workspace:
+        out = matmul_reduce_scatter(small, w, group, ctx_workspace)
+        assert_rs_close(out, small, w, group, name="context-manager")
+    assert ctx_workspace._destroyed, "__exit__ must call destroy()"
+    if rank == 0:
+        print("unit_test passed (context-manager cleanup)")
     dist.destroy_process_group()
 
 

@@ -14,7 +14,7 @@ import cuda.tile as ct
 
 from .matmul_reduce_scatter_triton import (
     _NUM_SLOTS,
-    _PUSH_MIN_TOKENS,
+    _push_min_tokens,
     MatmulReduceScatterWorkspace,
 )
 
@@ -105,7 +105,8 @@ def matmul_reduce_scatter_cutile(
         )
 
     if strategy == "auto":
-        strategy = "push" if M >= _PUSH_MIN_TOKENS else "tail"
+        push_min = _push_min_tokens(world_size)
+        strategy = "push" if push_min <= M else "tail"
     elif strategy not in ("tail", "push"):
         raise ValueError(f"strategy must be 'auto', 'tail' or 'push', got {strategy}")
 

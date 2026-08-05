@@ -2,7 +2,6 @@
 
 """Triton implementation of compute-signal/pull-reduce matmul + reduce-scatter. For details of the algorithm, see matmul_reduce_scatter.py."""
 
-import warnings
 from typing import Literal, Optional
 
 import torch
@@ -19,9 +18,16 @@ from ..all_gather_matmul.configs import Configs
 # cross-rank drift without a barrier.
 _NUM_SLOTS = 3
 
-# tail/push crossover, measured on 4xH100 (K=8192, N=2048, ws=4).
-# TODO(shape-aware): route on the GEMM/comm ratio (shifts with K, N, world_size).
-_PUSH_MIN_TOKENS = 8192
+# tail/push crossover per world_size, measured on 8xH100 (K=8192, N=2048).
+# TODO(shape-aware): route on the GEMM/comm ratio (shifts with K, N).
+# TODO(blackwell): SM>=100 reuses this H100 table; recalibrate on B200.
+_PUSH_MIN_TOKENS = {2: 3072, 4: 6144, 8: 12288}
+_PUSH_MIN_TOKENS_PER_RANK = 1536  # ~linear fit, for uncalibrated world sizes
+
+
+def _push_min_tokens(world_size: int) -> int:
+    """Token count at or above which strategy='auto' picks push over tail."""
+    return _PUSH_MIN_TOKENS.get(world_size, _PUSH_MIN_TOKENS_PER_RANK * world_size)
 
 
 # do_not_specialize: a monotonic seq would hit Triton's value%16 int
@@ -65,7 +71,13 @@ def wait_reduce_triton_kernel(
 
 
 class MatmulReduceScatterWorkspace:
-    """Symmetric-memory workspace for matmul_reduce_scatter."""
+    """Symmetric-memory workspace for matmul_reduce_scatter.
+
+    Use as a context manager for deterministic cleanup::
+
+        with MatmulReduceScatterWorkspace(group, max_M, N) as workspace:
+            out = matmul_reduce_scatter(inp, w, group, workspace)
+    """
 
     def __init__(
         self,
@@ -167,15 +179,11 @@ class MatmulReduceScatterWorkspace:
         self._views = {}
         self._destroyed = True
 
-    def __del__(self):
-        if not self._destroyed:
-            warnings.warn(
-                f"{self.__class__.__name__} was not explicitly destroyed. "
-                f"Call workspace.destroy() to ensure deterministic cleanup of "
-                f"symmetric-memory resources.",
-                ResourceWarning,
-                stacklevel=2,
-            )
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.destroy()
 
 
 def matmul_reduce_scatter_triton(
@@ -214,7 +222,8 @@ def matmul_reduce_scatter_triton(
         )
 
     if strategy == "auto":
-        strategy = "push" if M >= _PUSH_MIN_TOKENS else "tail"
+        push_min = _push_min_tokens(world_size)
+        strategy = "push" if push_min <= M else "tail"
     elif strategy not in ("tail", "push"):
         raise ValueError(f"strategy must be 'auto', 'tail' or 'push', got {strategy}")
 

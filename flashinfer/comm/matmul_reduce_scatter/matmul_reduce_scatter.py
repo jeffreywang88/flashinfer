@@ -26,8 +26,8 @@ Algorithm (compute-signal/pull-reduce):
 
 Workspace:
     Symmetric buffers live in a caller-owned MatmulReduceScatterWorkspace:
-    create once with the maximum token count, reuse for any M <= max_M,
-    destroy() when done.
+    create once with the maximum token count, reuse for any M <= max_M.
+    Use it as a context manager, which frees the buffers on exit.
 
 Routing:
     - SM >= 100 (Blackwell+): cuTile implementation (matmul_reduce_scatter_cutile)
@@ -52,13 +52,10 @@ Example (run with torchrun or mp.spawn across all GPU ranks)::
     w   = torch.randn(K, N, device=device, dtype=dtype)
 
     # --- workspace (collective; allocate once, reuse for any M <= max_M) ---
-    workspace = MatmulReduceScatterWorkspace(group, max_M=M, N=N, dtype=dtype)
-
-    # --- fused matmul + reduce-scatter ---
-    # out shape: (M // world_size, N)
-    out = matmul_reduce_scatter(inp, w, group, workspace)
-
-    workspace.destroy()
+    with MatmulReduceScatterWorkspace(group, max_M=M, N=N, dtype=dtype) as workspace:
+        # --- fused matmul + reduce-scatter ---
+        # out shape: (M // world_size, N)
+        out = matmul_reduce_scatter(inp, w, group, workspace)
 """
 
 from typing import Literal
@@ -88,8 +85,8 @@ def matmul_reduce_scatter(
     strategy: Literal["auto", "tail", "push"] = "auto",
 ):
     """Compute-signal/pull-reduce matmul + reduce-scatter; dispatches to cuTile
-    (SM>=100) or Triton. ``strategy="auto"`` picks tail/push by token count
-    (crossover 8192)."""
+    (SM>=100) or Triton. ``strategy="auto"`` picks tail/push by token count,
+    with a per-world-size crossover threshold (see ``_push_min_tokens``)."""
     major, _ = torch.cuda.get_device_capability(inp.device)
     if major >= 10:
         return matmul_reduce_scatter_cutile(
