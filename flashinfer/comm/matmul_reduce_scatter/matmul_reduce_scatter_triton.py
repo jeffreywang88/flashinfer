@@ -20,7 +20,6 @@ _NUM_SLOTS = 3
 
 # tail/push crossover per world_size, measured on 8xH100 (K=8192, N=2048).
 # TODO(shape-aware): route on the GEMM/comm ratio (shifts with K, N).
-# TODO(blackwell): SM>=100 reuses this H100 table; recalibrate on B200.
 _PUSH_MIN_TOKENS = {2: 3072, 4: 6144, 8: 12288}
 _PUSH_MIN_TOKENS_PER_RANK = 1536  # ~linear fit, for uncalibrated world sizes
 

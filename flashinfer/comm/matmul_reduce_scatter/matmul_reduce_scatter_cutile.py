@@ -14,9 +14,12 @@ import cuda.tile as ct
 
 from .matmul_reduce_scatter_triton import (
     _NUM_SLOTS,
-    _push_min_tokens,
     MatmulReduceScatterWorkspace,
 )
+
+
+# Tail/push crossover measured on 4xB200 (K=8192, N=2048, BF16).
+_PUSH_MIN_TOKENS = 10752
 
 
 # cuTile kernel: spin-wait per source, then reduce this rank's tile in fp32.
@@ -105,8 +108,7 @@ def matmul_reduce_scatter_cutile(
         )
 
     if strategy == "auto":
-        push_min = _push_min_tokens(world_size)
-        strategy = "push" if push_min <= M else "tail"
+        strategy = "push" if M >= _PUSH_MIN_TOKENS else "tail"
     elif strategy not in ("tail", "push"):
         raise ValueError(f"strategy must be 'auto', 'tail' or 'push', got {strategy}")
 
@@ -124,9 +126,8 @@ def matmul_reduce_scatter_cutile(
     def gemm_block(r0, r1):
         torch.matmul(inp[r0:r1], w, out=y[r0:r1])
 
-    tile_m, tile_n = 16, 256  # reduce tile; bandwidth-bound, larger adds nothing
-    # One tile per block; a non-persistent grid pipelines better than a
-    # persistent loop under cuTile.
+    # Retained after sweeping tile shapes and persistent grids on 4xB200.
+    tile_m, tile_n = 16, 256
     grid = (ct.cdiv(chunk_rows, tile_m) * ct.cdiv(N, tile_n),)
 
     main_stream = torch.cuda.current_stream()
